@@ -1,0 +1,94 @@
+import {
+	Controller,
+	HttpStatus,
+	Get,
+	Post,
+	Body,
+	HttpCode,
+	Put,
+	Param,
+	UseGuards,
+	Delete,
+	Query
+} from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { DeleteResult } from 'typeorm';
+import { IGoal, IPagination } from '@gauzy/contracts';
+import { GoalService } from './goal.service';
+import { Goal } from './goal.entity';
+import { CrudController } from './../core/crud';
+import { TenantPermissionGuard } from './../shared/guards';
+import { ParseJsonPipe, UUIDValidationPipe, UseValidationPipe } from './../shared/pipes';
+import { CreateGoalDTO, UpdateGoalDTO } from './dto';
+
+@ApiTags('Goals')
+@UseGuards(TenantPermissionGuard)
+@Controller('/goals')
+export class GoalController extends CrudController<Goal> {
+	constructor(private readonly goalService: GoalService) {
+		super(goalService);
+	}
+
+	@ApiOperation({ summary: 'Create Goal' })
+	@ApiResponse({
+		status: HttpStatus.OK,
+		description: 'Goal Created successfully',
+		type: Goal
+	})
+	@Post()
+	@UseValidationPipe({ transform: true })
+	async create(@Body() entity: CreateGoalDTO): Promise<IGoal> {
+		return this.goalService.create(entity);
+	}
+
+	@ApiResponse({
+		status: HttpStatus.NOT_FOUND,
+		description: 'Record not found'
+	})
+	@Get()
+	async findAll(@Query('data', ParseJsonPipe) data: any): Promise<IPagination<IGoal>> {
+		const { relations, findInput } = data;
+		return this.goalService.findAll({
+			where: { ...findInput },
+			relations,
+			order: { createdAt: 'ASC' }
+		});
+	}
+
+	@ApiOperation({ summary: 'Update an existing record' })
+	@ApiResponse({
+		status: HttpStatus.CREATED,
+		description: 'The record has been successfully edited.'
+	})
+	@ApiResponse({
+		status: HttpStatus.NOT_FOUND,
+		description: 'Record not found'
+	})
+	@ApiResponse({
+		status: HttpStatus.BAD_REQUEST,
+		description: 'Invalid input, The response body may contain clues as to what went wrong'
+	})
+	@HttpCode(HttpStatus.ACCEPTED)
+	@Put(':id')
+	@UseValidationPipe({ transform: true })
+	async update(@Param('id', UUIDValidationPipe) id: string, @Body() entity: UpdateGoalDTO): Promise<IGoal> {
+		// This is an update-through-create, so an id that matches nothing would be INSERTed as a new
+		// row — and fail on a NOT NULL column, answering 400 with the raw SQL in the body.
+		// `findOneByIdString` throws NotFoundException when the row is not in the caller's tenant, so
+		// this call turns that into a clean 404.
+		await this.goalService.findOneByIdString(id);
+
+		//We are using create here because create calls the method save()
+		//We need save() to save ManyToMany relations
+		//
+		//Errors are NOT swallowed: `create()` now rejects a cross-tenant write with ForbiddenException,
+		//and returning `undefined` would answer a refused write with 202 and an empty body.
+		return await this.goalService.create({ ...entity, id });
+	}
+
+	@HttpCode(HttpStatus.ACCEPTED)
+	@Delete(':id')
+	async delete(@Param('id', UUIDValidationPipe) id: string): Promise<DeleteResult> {
+		return this.goalService.delete(id);
+	}
+}

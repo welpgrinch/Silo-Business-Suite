@@ -1,0 +1,15 @@
+@forward '@shared/_pg-card';
+
+:host {
+  .custom-body-content {
+    background-color: unset;
+    padding-bottom: 0;
+    height: calc(100vh - 15.25rem) !important;
+  }
+}
+
+// Record-side Documents panel: its own card under the project form.
+.project-documents {
+  display: block;
+  margin-top: 1rem;
+}

@@ -1,0 +1,31 @@
+{
+	"name": "Silo Business Suite",
+	"build": { "dockerfile": "Dockerfile" },
+	"remoteUser": "node",
+	"hostRequirements": { "cpus": 8, "memory": "32gb", "storage": "64gb" },
+	"containerEnv": {
+		"NODE_ENV": "development",
+		"NODE_OPTIONS": "--max-old-space-size=12288",
+		"NX_DAEMON": "false",
+		"NX_ISOLATE_PLUGINS": "false",
+		"NX_PARALLEL": "1",
+		"NX_TUI": "false",
+		"NG_CLI_ANALYTICS": "false",
+		"NG_BUILD_MAX_WORKERS": "2",
+		"ELECTRON_SKIP_BINARY_DOWNLOAD": "1",
+		"CYPRESS_INSTALL_BINARY": "0",
+		"PUPPETEER_SKIP_DOWNLOAD": "true",
+		"PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD": "1"
+	},
+	"forwardPorts": [4200],
+	"portsAttributes": {
+		"4200": { "label": "Silo Business Suite", "onAutoForward": "openBrowser", "protocol": "http" },
+		"3000": { "label": "Internal API", "onAutoForward": "ignore" }
+	},
+	"otherPortsAttributes": { "onAutoForward": "ignore" },
+	"postCreateCommand": ["node", ".devcontainer/codespaces.cjs", "setup"],
+	"customizations": {
+		"vscode": { "extensions": ["Angular.ng-template", "dbaeumer.vscode-eslint"] },
+		"codespaces": { "openFiles": ["CODESPACES.md"] }
+	}
+}

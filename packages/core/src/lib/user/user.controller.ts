@@ -1,0 +1,326 @@
+// Modified code from https://github.com/xmlking/ngx-starter-kit.
+// MIT License, see https://github.com/xmlking/ngx-starter-kit/blob/develop/LICENSE
+// Copyright (c) 2018 Sumanth Chinthagunta
+import {
+	Controller,
+	Get,
+	HttpStatus,
+	Param,
+	Query,
+	UseGuards,
+	HttpCode,
+	Post,
+	Body,
+	Put,
+	Delete
+} from '@nestjs/common';
+import { ApiOperation, ApiResponse, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
+import { CommandBus } from '@nestjs/cqrs';
+import { DeleteResult, FindOptionsWhere, UpdateResult } from 'typeorm';
+import { ID, IPagination, IUser, IUserUiPreferences, PermissionsEnum } from '@gauzy/contracts';
+import { CrudController, BaseQueryDTO } from './../core/crud';
+import { RequestContext } from './../core/context';
+import { UUIDValidationPipe, ParseJsonPipe, UseValidationPipe } from './../shared/pipes';
+import { PermissionGuard, TenantPermissionGuard } from './../shared/guards';
+import { Permissions } from './../shared/decorators';
+import { User } from './user.entity';
+import { UserService } from './user.service';
+import { UserCreateCommand, UserDeleteCommand } from './commands';
+import { FactoryResetService } from './factory-reset/factory-reset.service';
+import {
+	UpdatePreferredLanguageDTO,
+	UpdatePreferredComponentLayoutDTO,
+	UpdateUserUiPreferencesDTO,
+	CreateUserDTO,
+	UpdateUserDTO,
+	FindMeQueryDTO
+} from './dto';
+
+/** Allowlist of safe relations to prevent unauthorized data access */
+const ALLOWED_RELATIONS: string[] = ['role', 'tenant', 'employee', 'candidate', 'tags'];
+
+@ApiTags('User')
+@ApiBearerAuth()
+@Controller('/user')
+export class UserController extends CrudController<User> {
+	constructor(
+		private readonly _userService: UserService,
+		private readonly _factoryResetService: FactoryResetService,
+		private readonly _commandBus: CommandBus
+	) {
+		super(_userService);
+	}
+
+	/**
+	 * GET endpoint to retrieve details of the currently logged-in user.
+	 *
+	 * @param options Query parameters specifying what additional relations to load for the user.
+	 * @returns A Promise that resolves to the IUser object.
+	 */
+	@ApiOperation({ summary: 'Find current user.' })
+	@ApiResponse({ status: HttpStatus.OK, description: 'Found current user', type: User })
+	@ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Record not found' })
+	@Get('/me')
+	@UseValidationPipe({ whitelist: true, transform: true })
+	async findMe(@Query() options: FindMeQueryDTO): Promise<IUser> {
+		return await this._userService.findMeUser(options);
+	}
+
+	/**
+	 * GET user by email
+	 *
+	 * @param email
+	 * @returns
+	 */
+	@ApiOperation({ summary: 'Find user by email address.' })
+	@ApiResponse({
+		status: HttpStatus.OK,
+		description: 'Found user by email address',
+		type: User
+	})
+	@ApiResponse({
+		status: HttpStatus.NOT_FOUND,
+		description: 'Record not found'
+	})
+	@UseGuards(TenantPermissionGuard, PermissionGuard)
+	@Permissions(PermissionsEnum.ORG_USERS_VIEW)
+	@Get('/email/:email')
+	async findByEmail(@Param('email') email: string): Promise<IUser | null> {
+		// Scope the lookup to the CALLER'S tenant. ORG_USERS_VIEW authorizes reading the users of
+		// your own tenant, not of every tenant on the installation — the unscoped lookup that used
+		// to sit here answered for any address in the database and leaked a foreign tenant's user
+		// profile (id, tenantId, names, phone, username, avatar, last login) to anyone who could
+		// guess an email address.
+		//
+		// The contract is deliberately unchanged: a miss still resolves to `null` with a 200, which
+		// is what the invite-contact form's async validator in the Angular UI checks for. Within the
+		// tenant the endpoint behaves exactly as before.
+		return await this._userService.getUserByEmailInTenant(email, RequestContext.currentTenantId());
+	}
+
+	/**
+	 * UPDATE user preferred language
+	 *
+	 * @param entity
+	 * @returns
+	 */
+	@HttpCode(HttpStatus.ACCEPTED)
+	@UseGuards(TenantPermissionGuard)
+	@Put('/preferred-language')
+	@UseValidationPipe({ transform: true, whitelist: true })
+	async updatePreferredLanguage(@Body() entity: UpdatePreferredLanguageDTO): Promise<IUser | UpdateResult> {
+		return await this._userService.updatePreferredLanguage(entity.preferredLanguage);
+	}
+
+	/**
+	 * UPDATE user preferred component layout
+	 *
+	 * @param entity
+	 * @returns
+	 */
+	@HttpCode(HttpStatus.ACCEPTED)
+	@UseGuards(TenantPermissionGuard)
+	@Put('/preferred-layout')
+	@UseValidationPipe({ transform: true, whitelist: true })
+	async updatePreferredComponentLayout(
+		@Body() entity: UpdatePreferredComponentLayoutDTO
+	): Promise<IUser | UpdateResult> {
+		return await this._userService.updatePreferredComponentLayout(entity.preferredComponentLayout);
+	}
+
+	/**
+	 * UPDATE the current user's per-feature UI preferences (shallow merge per feature key).
+	 *
+	 * Deliberately NOT `whitelist: true`: the body is keyed by feature (`aiChat`, ...) and future
+	 * features add their own keys without a DTO change; unknown keys are validated structurally
+	 * by the service (plain object or null, size-capped, no prototype keys).
+	 *
+	 * @param entity - Feature-keyed patch.
+	 * @returns The merged preferences as stored.
+	 */
+	@ApiOperation({ summary: "Update the current user's UI preferences (per-feature shallow merge)." })
+	@ApiResponse({ status: HttpStatus.ACCEPTED, description: 'Merged UI preferences' })
+	@ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'Invalid patch' })
+	@HttpCode(HttpStatus.ACCEPTED)
+	@UseGuards(TenantPermissionGuard)
+	@Put('/ui-preferences')
+	@UseValidationPipe({ transform: true })
+	async updateUiPreferences(@Body() entity: UpdateUserUiPreferencesDTO): Promise<IUserUiPreferences> {
+		return await this._userService.updateUiPreferences(entity);
+	}
+
+	/**
+	 * GET user count for specific tenant
+	 *
+	 * @returns
+	 */
+	@UseGuards(TenantPermissionGuard, PermissionGuard)
+	@Permissions(PermissionsEnum.ORG_USERS_VIEW)
+	@Get('/count')
+	async getCount(@Query() options: FindOptionsWhere<User>): Promise<number> {
+		return await this._userService.countBy(options);
+	}
+
+	/**
+	 * GET users for specific tenant using pagination
+	 *
+	 * @param options
+	 * @returns
+	 */
+	@UseGuards(TenantPermissionGuard, PermissionGuard)
+	@Permissions(PermissionsEnum.ORG_USERS_VIEW)
+	@Get('/pagination')
+	async pagination(@Query() options: BaseQueryDTO<User>): Promise<IPagination<IUser>> {
+		return await this._userService.paginate(options);
+	}
+
+	/**
+	 * GET users for specific tenant
+	 *
+	 * @param options
+	 * @returns
+	 */
+	@ApiOperation({ summary: 'Find all users.' })
+	@ApiResponse({
+		status: HttpStatus.OK,
+		description: 'Found users',
+		type: User
+	})
+	@ApiResponse({
+		status: HttpStatus.NOT_FOUND,
+		description: 'Record not found'
+	})
+	@UseGuards(TenantPermissionGuard, PermissionGuard)
+	@Permissions(PermissionsEnum.ORG_USERS_VIEW)
+	@Get('/')
+	async findAll(@Query() options: BaseQueryDTO<User>): Promise<IPagination<IUser>> {
+		return await this._userService.findAll(options);
+	}
+
+	/**
+	 * GET user by id
+	 *
+	 * @param id
+	 * @param data
+	 * @returns
+	 */
+	@ApiOperation({ summary: 'Find User by id.' })
+	@ApiResponse({
+		status: HttpStatus.OK,
+		description: 'Found one record',
+		type: User
+	})
+	@ApiResponse({
+		status: HttpStatus.NOT_FOUND,
+		description: 'Record not found'
+	})
+	@UseGuards(TenantPermissionGuard, PermissionGuard)
+	@Permissions(PermissionsEnum.ORG_USERS_VIEW)
+	@Get('/:id')
+	async findById(@Param('id', UUIDValidationPipe) id: ID, @Query('data', ParseJsonPipe) data?: any): Promise<IUser> {
+		const rawRelations = data?.relations;
+
+		let relations: any;
+		if (Array.isArray(rawRelations)) {
+			// Filter array entries to only allowed relation names
+			relations = rawRelations.filter((r: unknown) => typeof r === 'string' && ALLOWED_RELATIONS.includes(r));
+		} else if (typeof rawRelations === 'object' && rawRelations !== null) {
+			// Keep only allowed top-level keys and coerce values to true (strip nested objects)
+			relations = Object.fromEntries(
+				Object.entries(rawRelations)
+					.filter(([key, val]) => ALLOWED_RELATIONS.includes(key) && typeof val !== 'object')
+					.map(([key]) => [key, true])
+			);
+		} else {
+			relations = {};
+		}
+
+		return await this._userService.findOneByIdString(id, { relations });
+	}
+
+	/**
+	 * CREATE user for specific tenant
+	 *
+	 * @param entity
+	 * @returns
+	 */
+	@ApiOperation({ summary: 'Create new record' })
+	@ApiResponse({
+		status: HttpStatus.CREATED,
+		description: 'The record has been successfully created.' /*, type: T*/
+	})
+	@ApiResponse({
+		status: HttpStatus.BAD_REQUEST,
+		description: 'Invalid input, The response body may contain clues as to what went wrong'
+	})
+	@UseGuards(TenantPermissionGuard, PermissionGuard)
+	@Permissions(PermissionsEnum.ORG_USERS_EDIT)
+	@HttpCode(HttpStatus.CREATED)
+	@Post('/')
+	@UseValidationPipe({ whitelist: true })
+	async create(@Body() entity: CreateUserDTO): Promise<IUser> {
+		return await this._commandBus.execute(new UserCreateCommand(entity));
+	}
+
+	/**
+	 * UPDATE user by id
+	 *
+	 * @param id
+	 * @param entity
+	 * @returns
+	 */
+	@HttpCode(HttpStatus.ACCEPTED)
+	@UseGuards(TenantPermissionGuard, PermissionGuard)
+	@Permissions(PermissionsEnum.ORG_USERS_EDIT, PermissionsEnum.PROFILE_EDIT)
+	@Put('/:id')
+	@UseValidationPipe({ transform: true, whitelist: true })
+	async update(@Param('id', UUIDValidationPipe) id: ID, @Body() entity: UpdateUserDTO): Promise<IUser> {
+		return await this._userService.updateProfile(id, { ...entity, id });
+	}
+
+	/**
+	 * To permanently delete your account from your Gauzy app:
+	 *
+	 * @param id
+	 * @returns
+	 */
+	@ApiOperation({
+		summary: 'Delete record'
+	})
+	@ApiResponse({
+		status: HttpStatus.OK,
+		description: 'The record has been successfully deleted'
+	})
+	@ApiResponse({
+		status: HttpStatus.NOT_FOUND,
+		description: 'Record not found'
+	})
+	@UseGuards(TenantPermissionGuard, PermissionGuard)
+	@Permissions(PermissionsEnum.ALL_ORG_EDIT, PermissionsEnum.ACCESS_DELETE_ACCOUNT)
+	@Delete('/:id')
+	async delete(@Param('id', UUIDValidationPipe) id: ID): Promise<DeleteResult> {
+		return await this._commandBus.execute(new UserDeleteCommand(id));
+	}
+
+	/**
+	 * DELETE all user data from all tables
+	 *
+	 * @returns
+	 */
+	@ApiOperation({ summary: 'Delete all user data.' })
+	@ApiResponse({
+		status: HttpStatus.OK,
+		description: 'Deleted all user data.',
+		type: User
+	})
+	@ApiResponse({
+		status: HttpStatus.NOT_FOUND,
+		description: 'Record not found'
+	})
+	@UseGuards(TenantPermissionGuard, PermissionGuard)
+	@Permissions(PermissionsEnum.ACCESS_DELETE_ALL_DATA)
+	@Delete('/reset')
+	async factoryReset() {
+		return await this._factoryResetService.reset();
+	}
+}

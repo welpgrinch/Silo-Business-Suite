@@ -1,0 +1,61 @@
+import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { CommandHandler, ICommandHandler } from '@nestjs/cqrs';
+import { CommandBus } from '@nestjs/cqrs';
+import { isNotEmpty } from '@gauzy/utils';
+import { RequestContext } from './../../../../core';
+import { ImportRecordFindOrFailCommand } from './../../../import-record';
+import { ExportEntityClass, omitExportRedactionPlaceholders } from '../../../export-redact.decorator';
+import { ImportEntityFieldMapOrCreateCommand } from './../import-entity-field-map-or-create.command';
+
+@CommandHandler(ImportEntityFieldMapOrCreateCommand)
+export class ImportEntityFieldMapOrCreateHandler implements ICommandHandler<ImportEntityFieldMapOrCreateCommand> {
+	constructor(private readonly _commandBus: CommandBus) {}
+
+	public async execute(event: ImportEntityFieldMapOrCreateCommand): Promise<any> {
+		const { repository, where, entity, sourceId } = event;
+		try {
+			if (isNotEmpty(where)) {
+				return await repository.findOneOrFail({
+					where,
+					order: {
+						createdAt: 'DESC'
+					}
+				});
+			}
+			throw new NotFoundException();
+		} catch (error) {
+			try {
+				const { record, success } = await this._commandBus.execute(
+					new ImportRecordFindOrFailCommand({
+						tenantId: RequestContext.currentTenantId(),
+						sourceId,
+						entityType: repository.metadata.tableName
+					})
+				);
+				if (success && record) {
+					const { destinationId } = record;
+					// This row was imported before, so this is an UPDATE of a live row. An export
+					// archive carries placeholders where credentials were (GHSA-j5h5-r956-rxc3); writing
+					// them back would replace working tokens and password digests with masks and nulls.
+					return await repository.save({
+						id: destinationId,
+						...omitExportRedactionPlaceholders(repository.metadata.target as ExportEntityClass, entity)
+					});
+				}
+				throw new NotFoundException(`The import record was not found`);
+			} catch (error) {
+				return await this._create(repository, entity);
+			}
+		}
+	}
+
+	private async _create(repository, entity) {
+		try {
+			const obj = repository.create(entity);
+			// https://github.com/Microsoft/TypeScript/issues/21592
+			return await repository.save(obj as any);
+		} catch (err) {
+			throw new BadRequestException(err);
+		}
+	}
+}

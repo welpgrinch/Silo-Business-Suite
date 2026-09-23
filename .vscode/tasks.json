@@ -1,0 +1,44 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Silo: Start in Codespaces",
+			"type": "shell",
+			"command": "yarn",
+			"args": ["codespaces:start"],
+			"options": { "cwd": "${workspaceFolder}" },
+			"isBackground": true,
+			"problemMatcher": [],
+			"presentation": { "panel": "dedicated", "reveal": "always" }
+		},
+		{
+			"label": "Silo: Setup Codespaces",
+			"type": "shell",
+			"command": "yarn",
+			"args": ["codespaces:setup"],
+			"options": { "cwd": "${workspaceFolder}" },
+			"problemMatcher": []
+		},
+		{
+			"label": "Silo: Verify configuration",
+			"type": "process",
+			"command": "node",
+			"args": ["--test", ".devcontainer/codespaces.test.cjs", ".scripts/service-navigation.test.cjs", ".scripts/postinstall.test.js"],
+			"options": { "cwd": "${workspaceFolder}" },
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Gauzy: Service navigation tests",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"--test",
+				".scripts/service-navigation.test.cjs"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		}
+	]
+}
