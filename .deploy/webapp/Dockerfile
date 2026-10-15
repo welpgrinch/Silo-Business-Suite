@@ -1,38 +1,25 @@
-# Ever Gauzy Platform UI
+# Silo Business Suite UI
 #
 # Requires BuildKit (Docker 23+/buildx): uses RUN --mount stage bind mounts and build
-# secrets so the multi-GB node_modules trees never land in persisted layers (issue #9791).
+# secrets so the multi-GB node_modules trees never land in persisted layers.
 #
 # Build args consumed: NODE_ENV, DEMO, NODE_OPTIONS, NX_BRANCH (build stage only).
-# Optional build SECRETS (never pass these as build args — they would be embedded in
-# layers and trigger buildx SecretsUsedInArgOrEnv warnings):
-#   VERDACCIO_TOKEN       — auth for the packages.ever.co private registry
-#   NX_CLOUD_ACCESS_TOKEN — Nx Cloud (currently inert: NX_NO_CLOUD=true below)
-# e.g. docker buildx build --secret id=VERDACCIO_TOKEN,env=VERDACCIO_TOKEN ...
-#      or the `secrets:` input of docker/build-push-action.
 #
 # Runtime configuration: the Angular bundle is compiled with DOCKER_* placeholders
-# (see .scripts/configure.ts docker branch); at every container start entrypoint.prod.sh
-# (or entrypoint.compose.sh) substitutes the CURRENT environment into the JS bundles via
-# envsubst + replacements.sed. The ENV literals in the production stage below are the
-# load-bearing defaults for that substitution — keep them in sync with replacements.sed.
+# and substitutes CURRENT environment values at container start.
 
 FROM node:24.16.0-alpine3.23 AS dependencies
 
-LABEL maintainer="ever@ever.co"
-LABEL org.opencontainers.image.source="https://github.com/ever-co/ever-gauzy"
+LABEL maintainer="support@silo.local"
+LABEL org.opencontainers.image.source="https://github.com/welpgrinch/Silo-Business-Suite"
 
 ENV CI=true
-
-# We need to set to "development", because we are using "yarn install" below to setup
-# devDependencies even for production builds!
 ENV NODE_ENV=development
 
 RUN apk --update add bash && npm i -g npm@9 \
 	&& apk add --no-cache --virtual build-dependencies bind-tools curl tar xz jq python3 python3-dev py3-configobj py3-pip py3-setuptools dos2unix gcc g++ git make vips-dev && \
-	mkdir /srv/gauzy && chown -R node:node /srv/gauzy
+	mkdir /srv/silo && chown -R node:node /srv/silo
 
-# Verify the Node.js version
 RUN node --version
 RUN npm --version
 
@@ -44,7 +31,7 @@ RUN chmod +x /wait /entrypoint.compose.sh /entrypoint.prod.sh && dos2unix /entry
 
 USER node:node
 
-WORKDIR /srv/gauzy
+WORKDIR /srv/silo
 
 COPY --chown=node:node apps/gauzy/package.json ./apps/gauzy/
 
@@ -112,33 +99,10 @@ COPY --chown=node:node packages/ui-core/package.json ./packages/ui-core/
 COPY --chown=node:node packages/ui-config/package.json ./packages/ui-config/
 COPY --chown=node:node packages/ui-auth/package.json ./packages/ui-auth/
 
-# We do not build here Wakatime plugin, because it used in Desktop Apps for now
-# COPY --chown=node:node packages/plugins/integration-wakatime/package.json ./packages/plugins/integration-wakatime/
-
 COPY --chown=node:node decorate-angular-cli.js lerna.json package.json yarn.lock ./
 COPY --chown=node:node .scripts/postinstall.js ./.scripts/
-
-# Copy patch-package patches so `yarn postinstall.manual` (patch-package) can apply them.
-# Without this, patch-package prints "No patch files found" and the typeorm v1 compat patch is
-# never applied. (typeorm is installed here because packages/core/package.json is copied above.)
 COPY --chown=node:node patches ./patches
 
-# VERDACCIO_TOKEN arrives as a BuildKit secret (optional; absent file → private registry
-# skipped). Registry rewrite, install and .npmrc/.yarnrc cleanup happen in ONE RUN so the
-# token never persists in any layer.
-# Must be without --production because we need dev deps installed.
-#
-# This image's final stage is `FROM nginx:alpine` and copies nothing but the compiled
-# Angular bundle out of `build` — no Node runtime, no database. `better-sqlite3` and
-# `bcrypt` exist only inside these throwaway stages, so the postinstall guard that
-# normally fails a build when a native package produces no binary must not apply here:
-# it would reject an image over a package the image never ships. It fired for real when
-# a transient `unofficial-builds.nodejs.org` header fetch stopped node-gyp mid-compile
-# and took the stage web image down with it.
-#
-# The api and worker images deliberately leave this unset and keep the strict default —
-# the api sets `ENV DB_TYPE=better-sqlite3`, so a missing binary there is fatal at runtime
-# and the build SHOULD stop.
 ENV REQUIRE_NATIVE_BINARIES=""
 
 ARG VERDACCIO_REGISTRY=""
@@ -150,8 +114,6 @@ RUN --mount=type=secret,id=VERDACCIO_TOKEN,uid=1000 \
 	sed -i "s|https://registry.yarnpkg.com|${VERDACCIO_REGISTRY%/}|g" yarn.lock && \
 	sed -i "s|https://registry.npmjs.org|${VERDACCIO_REGISTRY%/}|g" yarn.lock; \
 	elif [ -n "$VERDACCIO_TOKEN" ]; then \
-	echo "Internal Verdaccio VIP not in use (VERDACCIO_REGISTRY unset, or its probe failed) - installing through the public packages.ever.co route, which is known to truncate large tarballs mid-stream." && \
-	echo "//packages.ever.co/:_authToken=${VERDACCIO_TOKEN}" >> .npmrc && \
 	echo "registry=https://packages.ever.co/" >> .npmrc && \
 	echo "always-auth=true" >> .npmrc && \
 	echo 'registry "https://packages.ever.co/"' >> .yarnrc && \
@@ -166,70 +128,39 @@ RUN --mount=type=secret,id=VERDACCIO_TOKEN,uid=1000 \
 FROM node:24.16.0-alpine3.23 AS development
 
 USER node:node
+WORKDIR /srv/silo
 
-WORKDIR /srv/gauzy
-
-COPY --chown=node:node --from=dependencies /wait /entrypoint.compose.sh /entrypoint.prod.sh /replacements.sed  /
-COPY --chown=node:node --from=dependencies /srv/gauzy .
+COPY --chown=node:node --from=dependencies /wait /entrypoint.compose.sh /entrypoint.prod.sh /replacements.sed /
+COPY --chown=node:node --from=dependencies /srv/silo .
 COPY . .
 
 FROM node:24.16.0-alpine3.23 AS build
 
-WORKDIR /srv/gauzy
-
+WORKDIR /srv/silo
 RUN mkdir dist
 
-# Per-package node_modules created by the workspace install in the dependencies stage
-# (non-hoisted deps + .bin shims — apps/gauzy/node_modules notably carries the nohoisted
-# @angular packages). Node module resolution needs them next to each package/app source.
-# These trees are small — unlike the root node_modules, which is bind-mounted below
-# instead of being copied into a layer.
-COPY --chown=node:node --from=dependencies /srv/gauzy/packages ./packages
-COPY --chown=node:node --from=dependencies /srv/gauzy/apps ./apps
-
-# Full source from the build context (root/per-package node_modules and dist are
-# .dockerignore'd, so this merges source files over the trees copied above).
+COPY --chown=node:node --from=dependencies /srv/silo/packages ./packages
+COPY --chown=node:node --from=dependencies /srv/silo/apps ./apps
 COPY --chown=node:node . .
 
 ENV CI=true
-
-# We make NODE_ENV and other env vars passed as build argument to be available in this stage
 ARG NODE_ENV
 ARG DEMO
 ARG NODE_OPTIONS
 ARG NX_BRANCH
-
-# Deployed release version (git tag) + commit SHA. Baked into the Angular bundle
-# at build time by .scripts/configure.ts (env.GAUZY_APP_VERSION/COMMIT) so the
-# footer shows them — they are image constants, not runtime-substituted.
 ARG GAUZY_APP_VERSION
 ARG GAUZY_APP_COMMIT
 
 ENV NODE_OPTIONS=${NODE_OPTIONS:-"--max-old-space-size=30000"}
 ENV NODE_ENV=${NODE_ENV:-production}
 ENV DEMO=${DEMO:-false}
-
 ENV GAUZY_APP_VERSION=${GAUZY_APP_VERSION}
 ENV GAUZY_APP_COMMIT=${GAUZY_APP_COMMIT}
-
 ENV IS_DOCKER=true
-
-# The org's Nx Cloud is disabled — do not flip this (builds hard-fail with auth errors).
 ENV NX_NO_CLOUD=true
 ENV NX_BRANCH=${NX_BRANCH}
 
-# The multi-GB root node_modules is bind-mounted from the dependencies stage for this RUN
-# only — it never lands in a persisted layer (this was the main cause of the 44GB+
-# build-time disk footprint, see issue #9791). `rw` allows transient cache writes into
-# the mount, which are discarded after the step. The @gauzy/* symlinks inside the mount
-# resolve to /srv/gauzy/packages|apps on this stage's fs — that is why the source COPYs
-# above must happen before this RUN. `yarn run config:*` (ts-node .scripts/configure.ts)
-# runs inside this same RUN and writes packages/ui-config environment files to the stage fs.
-# The nx local task cache (.nx/cache — NOT disabled by CI=true) is written to the stage
-# fs and would duplicate every build output into this layer, so it is deleted in the
-# same RUN. (The Angular CLI disk cache IS disabled under CI.)
-# NX_CLOUD_ACCESS_TOKEN is an optional build secret (inert while NX_NO_CLOUD=true).
-RUN --mount=type=bind,from=dependencies,source=/srv/gauzy/node_modules,target=/srv/gauzy/node_modules,rw \
+RUN --mount=type=bind,from=dependencies,source=/srv/silo/node_modules,target=/srv/silo/node_modules,rw \
 	--mount=type=secret,id=NX_CLOUD_ACCESS_TOKEN,uid=1000 \
 	export NX_CLOUD_ACCESS_TOKEN="$(cat /run/secrets/NX_CLOUD_ACCESS_TOKEN 2>/dev/null || true)" && \
 	if [ "$NODE_ENV" = "production" ]; then \
@@ -241,34 +172,22 @@ RUN --mount=type=bind,from=dependencies,source=/srv/gauzy/node_modules,target=/s
 
 FROM nginx:alpine AS production
 
-# USER nginx:nginx
-
-WORKDIR /srv/gauzy
+WORKDIR /srv/silo
 
 COPY --chown=nginx:nginx --from=dependencies /wait /entrypoint.compose.sh /entrypoint.prod.sh /replacements.sed ./
 COPY --chown=nginx:nginx .deploy/webapp/nginx.compose.conf /etc/nginx/conf.d/compose.conf.template
 COPY --chown=nginx:nginx .deploy/webapp/nginx.prod.conf /etc/nginx/conf.d/prod.conf.template
-COPY --chown=nginx:nginx --from=build /srv/gauzy/dist/apps/gauzy .
+COPY --chown=nginx:nginx --from=build /srv/silo/dist/apps/gauzy .
 
 RUN chmod +x wait entrypoint.compose.sh entrypoint.prod.sh && \
 	chmod a+rw /etc/nginx/conf.d/compose.conf.template /etc/nginx/conf.d/prod.conf.template
 
 ENV CI=true
-
-# Load-bearing runtime defaults: entrypoint.prod.sh/entrypoint.compose.sh substitute the
-# CURRENT environment into the compiled JS bundles (envsubst + replacements.sed) at every
-# container start, so these literals are what any deployment gets when it does not set
-# the variable itself. They are the SAME values the previous ${X:-default} expansions
-# always produced (the build args never reached this stage). Variables with no default
-# (SENTRY_DSN, POSTHOG_KEY, CHATWOOT_SDK_TOKEN, GOOGLE_MAPS_API_KEY, ...) used to bake
-# empty strings and are now simply unset — identical substitution result, and no more
-# secret-named ENV in a public image.
 ENV NODE_OPTIONS="--max-old-space-size=12288"
 ENV NODE_ENV=production
 
 ENV API_HOST=api
 ENV API_PORT=3000
-
 ENV API_BASE_URL=http://localhost:3000
 ENV CLIENT_BASE_URL=http://localhost:4200
 ENV WEB_HOST=0.0.0.0
@@ -281,34 +200,32 @@ ENV GOOGLE_PLACE_AUTOCOMPLETE=false
 ENV DEFAULT_LATITUDE=42.6459136
 ENV DEFAULT_LONGITUDE=23.3332736
 ENV DEFAULT_CURRENCY=USD
-ENV GAUZY_CLOUD_APP="https://app.gauzy.co"
-ENV GAUZY_CLOUD_ENDPOINT="https://api.gauzy.co"
-ENV NO_INTERNET_LOGO="assets/images/logos/logo_Gauzy.svg"
+ENV CLOUD_APP="https://app.silo.local"
+ENV CLOUD_ENDPOINT="https://api.silo.local"
+ENV NO_INTERNET_LOGO="assets/images/logos/logo_silo.svg"
 ENV FILE_PROVIDER="LOCAL"
-ENV PLATFORM_LOGO="assets/images/logos/logo_Gauzy.svg"
-ENV GAUZY_DESKTOP_LOGO_512X512="assets/icons/icon_512x512.png"
-ENV PLATFORM_PRIVACY_URL="https://gauzy.co/privacy"
-ENV PLATFORM_TOS_URL="https://gauzy.co/tos"
-ENV PROJECT_REPO="https://github.com/ever-co/ever-gauzy.git"
-ENV COMPANY_NAME="Ever Co. LTD"
-ENV COMPANY_LINK="https://ever.co"
-ENV COMPANY_SITE_NAME="Gauzy"
-ENV COMPANY_SITE_LINK="https://gauzy.co"
-ENV COMPANY_GITHUB_LINK="https://github.com/ever-co"
-ENV COMPANY_GITLAB_LINK="https://gitlab.com/ever-co"
-ENV COMPANY_FACEBOOK_LINK="https://www.facebook.com/gauzyplatform"
-ENV COMPANY_TWITTER_LINK="https://twitter.com/gauzyplatform"
-ENV COMPANY_IN_LINK="https://www.linkedin.com/company/everhq"
-ENV PLATFORM_WEBSITE_URL="https://gauzy.co"
-ENV PLATFORM_WEBSITE_DOWNLOAD_URL="https://gauzy.co/downloads"
-ENV DESKTOP_APP_DOWNLOAD_LINK_APPLE="https://gauzy.co/downloads#desktop/apple"
-ENV DESKTOP_APP_DOWNLOAD_LINK_WINDOWS="https://gauzy.co/downloads#desktop/windows"
-ENV DESKTOP_APP_DOWNLOAD_LINK_LINUX="https://gauzy.co/downloads#desktop/linux"
-ENV MOBILE_APP_DOWNLOAD_LINK="https://gauzy.co/downloads#mobile"
-ENV EXTENSION_DOWNLOAD_LINK="https://gauzy.co/downloads#extensions"
+ENV PLATFORM_LOGO="assets/images/logos/logo_silo.svg"
+ENV DESKTOP_LOGO_512X512="assets/icons/icon_512x512.png"
+ENV PLATFORM_PRIVACY_URL="https://silo.local/privacy"
+ENV PLATFORM_TOS_URL="https://silo.local/tos"
+ENV PROJECT_REPO="https://github.com/welpgrinch/Silo-Business-Suite.git"
+ENV COMPANY_NAME="Silo Business Suite"
+ENV COMPANY_LINK="https://silo.local"
+ENV COMPANY_SITE_NAME="Silo Business Suite"
+ENV COMPANY_SITE_LINK="https://silo.local"
+ENV COMPANY_GITHUB_LINK="https://github.com/welpgrinch"
+ENV COMPANY_GITLAB_LINK=""
+ENV COMPANY_FACEBOOK_LINK=""
+ENV COMPANY_TWITTER_LINK=""
+ENV COMPANY_IN_LINK=""
+ENV PLATFORM_WEBSITE_URL="https://silo.local"
+ENV PLATFORM_WEBSITE_DOWNLOAD_URL=""
+ENV DESKTOP_APP_DOWNLOAD_LINK_APPLE=""
+ENV DESKTOP_APP_DOWNLOAD_LINK_WINDOWS=""
+ENV DESKTOP_APP_DOWNLOAD_LINK_LINUX=""
+ENV MOBILE_APP_DOWNLOAD_LINK=""
+ENV EXTENSION_DOWNLOAD_LINK=""
 
 EXPOSE ${WEB_PORT}
-
 ENTRYPOINT [ "./entrypoint.prod.sh" ]
-
 CMD [ "nginx", "-g", "daemon off;" ]
