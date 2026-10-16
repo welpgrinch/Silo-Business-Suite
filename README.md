@@ -6,6 +6,8 @@ This repository contains the Silo Business Suite application code, deployment as
 
 Silo Business Suite provides the core business operations platform in a monorepo layout, with frontend, API, integrations, deployment configuration, and workspace tooling.
 
+Silo is an integrated platform that bundles ERP (Enterprise Resource Planning), CRM (Customer Relationship Management), HRM (Human Resource Management), ATS (Applicant Tracking System), and PM (Project Management) into a single cohesive suite — enabling operations, sales, HR, hiring, and project delivery to work together.
+
 ## Getting started
 
 - Review the repository root docs and deployment files before building or deploying.
